@@ -1,4 +1,3 @@
-
 #include "GY521.h"
 
 GY521 sensor(0x68);
