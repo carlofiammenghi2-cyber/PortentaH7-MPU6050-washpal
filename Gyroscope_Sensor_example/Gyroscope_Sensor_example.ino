@@ -1,8 +1,17 @@
+//
+//    FILE: GY521_readCalibration_1.ino
+//  AUTHOR: Rob Tillaart
+// PURPOSE: read the calibration values / errors for a flat sensor.
+//     URL: https://github.com/RobTillaart/GY521
+
+
 #include "GY521.h"
 
 GY521 sensor(0x68);
 
 uint32_t counter = 0;
+int count_vibration = 0;
+double threshold = 0.05;
 
 float ax, ay, az;
 float gx, gy, gz;
@@ -13,7 +22,7 @@ void setup()
 {
   Serial.begin(115200);
   Serial.println();
-  Serial.println(_FILE_);
+  Serial.println(__FILE__);
   Serial.print("GY521_LIB_VERSION: ");
   Serial.println(GY521_LIB_VERSION);
 
@@ -57,6 +66,7 @@ void loop()
     t += sensor.getTemperature();
   }
 
+/* 
   if (counter % 10 == 0)
   {
     Serial.println("\n\tACCELEROMETER\t\tGYROSCOPE\t\tTEMPERATURE");
@@ -92,7 +102,13 @@ void loop()
   Serial.print('\t');
   Serial.print(t * 0.05, 2);
   Serial.println();
+*/
 
+  if(ax>threshold && ay>threshold || ax>threshold && az>threshold || ay>threshold && az>threshold) {
+    count_vibration = count_vibration + 1;
+    Serial.print(count_vibration);
+    Serial.println(" - Detected vibration");
+  }
   //  adjust calibration errors so table should get all zero's.
   sensor.axe += ax * 0.05;
   sensor.aye += ay * 0.05;
@@ -105,3 +121,5 @@ void loop()
   delay(100);
 }
 
+
+//  -- END OF FILE --
