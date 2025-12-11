@@ -1,111 +1,90 @@
 /*
-  PERIPHERAL BOARD + IR SENSOR
+  PERIPHERAL BOARD: IR Sensor - High Speed Continuous Mode
+  - Sends '1' every 100ms while motion is detected.
+  - Optimized for the new "50 Count" threshold (fills in ~5 seconds).
 */
 #include <ArduinoBLE.h>
 
-// --- BLE CONFIGURATION ---
+// PIN CONFIGURATION
+const int IR_PIN = D2; 
+
+// BLE SETTINGS
 const char* serviceUUID = "19B10000-E8F2-537E-4F6C-D104768A1214";
 const char* charUUID    = "19B10001-E8F2-537E-4F6C-D104768A1214";
 
-BLEService sensorService(serviceUUID); 
-// We add "BLENotify" so the Central gets data automatically without asking
-BLEByteCharacteristic sensorChar(charUUID, BLERead | BLENotify);
-
-// --- SENSOR CONFIGURATION ---
-int pirPin = 2; // Ensure your sensor is on Pin D2
-int pirState = LOW;
-int val = 0;
-
-unsigned long motionDetectedTime = 0;
-unsigned long noMotionStartTime = 0; 
-unsigned long emptyDelay = 10000;    
-unsigned long presenceDelay = 5000;   
-
-bool presenceReported = false;
-bool motionActive = false;
-bool roomEmptyReported = false; // Added to prevent spamming "Empty" BLE packets
+BLEService irService(serviceUUID);
+BLEByteCharacteristic irCharacteristic(charUUID, BLERead | BLENotify);
 
 void setup() {
-  Serial.begin(9600);
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(pirPin, INPUT);
+  Serial.begin(115200);
+  pinMode(IR_PIN, INPUT);
   
-  // --- BLE SETUP ---
+  // LED Setup
+  pinMode(LEDR, OUTPUT);
+  pinMode(LEDG, OUTPUT);
+  pinMode(LEDB, OUTPUT);
+  
+  // Turn all OFF (High is OFF on Portenta)
+  digitalWrite(LEDR, HIGH); 
+  digitalWrite(LEDG, HIGH); 
+  digitalWrite(LEDB, HIGH);
+
+  // Start BLE
   if (!BLE.begin()) {
-    Serial.println("starting BLE failed!");
-    while (1);
+    while (1) { digitalWrite(LEDR, LOW); } // Stuck Red = Error
   }
 
-  BLE.setLocalName("PortentaSensor");
-  BLE.setAdvertisedService(sensorService);
-  sensorService.addCharacteristic(sensorChar);
-  BLE.addService(sensorService);
-  
-  // Initial Value
-  sensorChar.writeValue(0); 
-  
+  BLE.setLocalName("PortentaSensor"); 
+  BLE.setAdvertisedService(irService);
+  irService.addCharacteristic(irCharacteristic);
+  BLE.addService(irService);
+
+  irCharacteristic.writeValue(0);
   BLE.advertise();
-  Serial.println("BLE Active. Waiting for Central...");
+
+  // Solid Green = Ready and Waiting for Connection
+  digitalWrite(LEDG, LOW); 
 }
 
 void loop() {
-  // Listen for connections
   BLEDevice central = BLE.central();
 
-  // We only run the logic if a Central is connected, 
-  // otherwise we just wait.
   if (central) {
-    Serial.print("Connected to central: ");
-    Serial.println(central.address());
+    // When connected, turn off the "Waiting" Green light
+    digitalWrite(LEDG, HIGH); 
 
     while (central.connected()) {
-      readSensorAndSend(); // Run your sensor logic here
-    }
+      int currentState = digitalRead(IR_PIN);
 
-    Serial.println("Disconnected");
-    digitalWrite(LED_BUILTIN, HIGH); // Turn off LED
-  }
-}
-
-void readSensorAndSend() {
-  val = digitalRead(pirPin);
-  unsigned long currentTime = millis();
-
-  if (val == HIGH) {
-    // 1. MOTION DETECTED
-    if (!motionActive) {
-      motionDetectedTime = currentTime; 
-      presenceReported = false; 
-      motionActive = true;
-      roomEmptyReported = false; // Reset empty flag
+      // --- CONTINUOUS HIGH-SPEED SENDING ---
       
-      Serial.println("Motion detected!");
-      sensorChar.writeValue(1); // SEND CODE 1 via BLE
-      digitalWrite(LED_BUILTIN, LOW); // LED ON
-    } else {
-      // 2. PRESENCE CONFIRMED
-      if (!presenceReported && (currentTime - motionDetectedTime >= presenceDelay)) {
-        Serial.println("Someone is in the room");
-        sensorChar.writeValue(2); // SEND CODE 2 via BLE
-        presenceReported = true;
+      // If motion is detected (1), send it REPEATEDLY
+      if (currentState == 1) {
+        irCharacteristic.writeValue((byte)1);
+        Serial.println("Motion! Sending 1...");
+        
+        // Blink Blue LED to show data transmission
+        digitalWrite(LEDB, LOW); delay(10); digitalWrite(LEDB, HIGH);
+
+        // Updated Delay: 100ms
+        // Target: 50 counts. 
+        // 50 * 100ms = 5 Seconds of motion to trigger "Washing"
+        delay(90); 
+      } 
+      // If no motion (0), only send if it changed (Save bandwidth)
+      else {
+         static int lastWasZero = -1;
+         if (lastWasZero != 0) {
+            irCharacteristic.writeValue((byte)0);
+            Serial.println("Empty. Sending 0...");
+            lastWasZero = 0;
+         }
+         // Check again in 100ms
+         delay(100); 
       }
     }
-  } else {
-    // Motion stopped logic
-    if (motionActive) {
-      Serial.println("Motion stopped!");
-      digitalWrite(LED_BUILTIN, HIGH); // LED OFF
-      motionActive = false;
-      noMotionStartTime = currentTime;
-    }
-
-    // 3. ROOM EMPTY
-    if (!roomEmptyReported && (currentTime - noMotionStartTime) > emptyDelay) {
-      Serial.println("The washing machine room is empty");
-      sensorChar.writeValue(0); // SEND CODE 0 via BLE
-      
-      noMotionStartTime = currentTime; 
-      roomEmptyReported = true; // Flag to ensure we only send this once
-    }
+    
+    // If disconnected, turn Green "Waiting" light back on
+    digitalWrite(LEDG, LOW); 
   }
 }

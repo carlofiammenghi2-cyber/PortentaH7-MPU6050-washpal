@@ -1,338 +1,437 @@
-/*
-  CENTRAL BOARD: Ricevitore BLE + Sensore Vibrazione Locale (GY521)
-*/
 #include <ArduinoBLE.h>
 #include "GY521.h"
 #include <WiFi.h>
 #include "arduino_secrets.h"
 #include <Wire.h>
+#include <rtos.h> 
 
-// --- CONFIGURAZIONE BLE ---
+// --- CONFIGURATION ---
 const char* serviceUUID = "19B10000-E8F2-537E-4F6C-D104768A1214";
 const char* charUUID    = "19B10001-E8F2-537E-4F6C-D104768A1214";
 
-///////please enter your sensitive data in the Secret tab/arduino_secrets.h
-char ssid[] = SECRET_SSID;    // your network SSID (name)
-char pass[] = SECRET_PASS;    // your network password (use for WPA, or use as key for WEP)
-int keyIndex = 0;             // your network key Index number (needed only for WEP)
-
-int status = WL_IDLE_STATUS;
-
+char ssid[] = SECRET_SSID;
+char pass[] = SECRET_PASS;
 WiFiServer server(80);
 
-// --- CONFIGURAZIONE GY521 (Giroscopio) ---
+// --- HARDWARE ---
 GY521 sensor(0x68);
 
-uint32_t vibration_counter = 0;
-double threshold = 1; // Soglia sensibilità vibrazione
+// --- GLOBAL VARIABLES ---
+BLEDevice centralPeripheral; 
+BLECharacteristic irCharacteristic;
+bool isBleConnected = false;
+int lastIRStatus = -1; 
 
-// Variabili per la logica del giroscopio
-float ax, ay, az;
-float gx, gy, gz;
-float t;
+// --- WASHING STATE MACHINE ---
+enum WashState {
+  STATE_IDLE,
+  STATE_WASHING,
+  STATE_READY
+};
+WashState machineState = STATE_IDLE;
 
-// Timer per lettura non bloccante
+// Timestamps & Counters
+unsigned long firstVibrationTime = 0; 
+unsigned long lastVibrationTime = 0;  
+uint32_t vibration_counter = 0;       
+
+// NEW: STARTUP FILTER (Threshold increased to 150)
+uint32_t ir_startup_counter = 0;      
+unsigned long startupWindowStart = 0; 
+const int MIN_VIB_TO_START = 50;      // Vibration stays at 50
+const int MIN_IR_TO_START = 150;      // UPDATED: IR needs 150 counts (approx 15 sec)
+const unsigned long STARTUP_WINDOW = 300000; // 5 Minutes
+
+// Logic Constants
+const unsigned long TIMEOUT_DONE = 300000; // 5 Mins silence = Done
+const unsigned long TIMEOUT_RESET = 300000; // 5 Mins empty = Reset
+
+// Pickup Logic
+bool userVisitedForPickup = false;
+unsigned long roomEmptyStartTime = 0;
+
+// IR Tracker
+unsigned long lastMotionTime = 0; 
+bool hasDetectedMotionOnce = false; 
+
+// Gyro Config
 unsigned long lastGyroReadTime = 0;
-const long gyroInterval = 100; // Leggi il giroscopio ogni 100ms
+const long gyroInterval = 100; 
+const float VIBRATION_THRESHOLD = 0.25; 
 
-// Global state for webpage
-volatile byte lastIRStatus = 0;
-volatile int lastVibrationCount = 0;
-volatile float lastAx = 0, lastAy = 0, lastAz = 0;
+// --- ECO MODE ---
+bool isEcoMode = false; 
 
-
-void setupWebServer() {
-  // put your setup code here, to run once:
-  Serial.begin(9600);
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for native USB port only
-  }
-  
-  Serial.println("Access Point Web Server");
-  // by default the local IP address of will be 192.168.3.1
-  // you can override it with the following:
-  // WiFi.config(IPAddress(10, 0, 0, 1));
-  // print the network name (SSID);
-  Serial.print("Creating access point named: ");
-  Serial.println(ssid);
-
-  //Create the Access point
-  status = WiFi.beginAP(ssid,pass);
-  if(status != WL_AP_LISTENING){
-    Serial.println("Creating access point failed");
-    // don't continue
-    while (true);
-  }
-
-  // wait 10 seconds for connection:
-  delay(10000);
-
-  // start the web server on port 80
-  server.begin();
-
-  // you're connected now, so print out the status
-  printWiFiStatus();
-}
-
-void printWiFiStatus() {
-  // print the SSID of the network you're attached to:
-  Serial.print("SSID: ");
-  Serial.println(WiFi.SSID());
-
-  // print your Wi-Fi shield's IP address:
-  IPAddress ip = WiFi.localIP();
-  Serial.print("IP Address: ");
-  Serial.println(ip);
-
-  // print where to go in a browser:
-  Serial.print("To see this page in action, open a browser to http://");
-  Serial.println(ip);
-}
-
-void handleWebClient() {
-  // Check WiFi status changes (optional, from your original code)
-  static uint8_t status = WL_IDLE_STATUS;
-  if (status != WiFi.status()) {
-    status = WiFi.status();
-    if (status == WL_AP_CONNECTED) {
-      Serial.println("Device connected to AP");
-    } else {
-      Serial.println("Device disconnected from AP");
-    }
-  }
-
-  // Listen for incoming web clients
-  WiFiClient client = server.available();
-  if (client) {
-    Serial.println("new web client");
-    String currentLine = "";
-
-    while (client.connected()) {
-      if (client.available()) {
-        char c = client.read();
-        Serial.write(c);
-        
-        if (c == '\n') {
-          // End of HTTP request - send response
-          if (currentLine.length() == 0) {
-            // HTTP headers
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println();
-
-            // HTML content with your sensor data
-            client.print("<html><head>");
-            client.print("<meta http-equiv=\"refresh\" content=\"5\">"); // Auto-refresh every 5s
-            client.print("<style>");
-            client.print("* { font-family: sans-serif; margin: 0; padding: 0; }");
-            client.print("body { padding: 2em; font-size: 1.4em; text-align: center; background: #f0f8ff; }");
-            client.print("h1 { color: #2c3e50; margin-bottom: 2em; }");
-            client.print(".sensor { background: white; margin: 1em auto; padding: 1.5em; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); max-width: 600px; }");
-            client.print(".status0 { color: #27ae60; } .status1 { color: #f39c12; } .status2 { color: #e74c3c; }");
-            client.print(".vibration { font-size: 1.2em; font-weight: bold; }");
-            client.print("</style></head>");
-            client.print("<body>");
-            client.print("<h1>🏢 Sensor Monitor Dashboard</h1>");
-
-            // IR Status (BLE from other board)
-            client.print("<div class=\"sensor\">");
-            client.print("<h2>📡 IR Status (Remoto)</h2>");
-            client.print("<p class=\"status");
-            client.print(lastIRStatus);
-            client.print("\">");
-            
-            if (lastIRStatus == 0) client.print("✅ Stanza Vuota");
-            else if (lastIRStatus == 1) client.print("⚠️ Movimento Rilevato!");
-            else if (lastIRStatus == 2) client.print("🚨 Presenza Confermata");
-            else client.print("❓ Sconosciuto");
-            
-            client.print("</p></div>");
-
-            // Vibration Status (Local Gyro)
-            client.print("<div class=\"sensor\">");
-            client.print("<h2>📱 Vibrazione (Locale GY521)</h2>");
-            client.print("<p class=\"vibration\">Contatore: ");
-            client.print(lastVibrationCount);
-            client.print("</p>");
-            
-            client.print("<p>Accelerazione media:<br>");
-            client.print("Ax: ");
-            client.print(lastAx, 2);
-            client.print(" | Ay: ");
-            client.print(lastAy, 2);
-            client.print(" | Az: ");
-            client.print(lastAz, 2);
-            client.print("</p></div>");
-
-            client.print("<p style=\"margin-top: 2em;\"><small>Auto-refresh ogni 5 secondi | IP: ");
-            client.print(WiFi.localIP());
-            client.print("</small></p>");
-            client.print("</body></html>");
-
-            // End HTTP response
-            client.println();
-            break;
-          } else {
-            currentLine = "";
-          }
-        } else if (c != '\r') {
-          currentLine += c;
-        }
-      }
-    }
-    client.stop();
-    Serial.println("web client disconnected");
-  }
-}
+// --- PROTOTYPES ---
+void setupWebServer();
+void handleWebClient();
+void sendHTML(WiFiClient &client);
+void checkVibration();
+void manageBLE();
+void manageLaundryLogic();
+void resetSystem();
+void resetIdleCounters();
+void enterEcoMode();
+void exitEcoMode();
 
 void setup() {
-  Serial.begin(115200); // Aumentato baud rate per gestire più dati
-
-  setupWebServer();
+  Serial.begin(115200);
   
+  // Power Saving
+  pinMode(LEDR, OUTPUT); pinMode(LEDG, OUTPUT); pinMode(LEDB, OUTPUT);
+  digitalWrite(LEDR, HIGH); digitalWrite(LEDG, HIGH); digitalWrite(LEDB, HIGH);
+
+  // WiFi
+  Serial.print("Creating AP: ");
+  Serial.println(ssid);
+  if (WiFi.beginAP(ssid, pass) != WL_AP_LISTENING) while (true);
+  delay(2000);
+  server.begin();
+  
+  // Gyro
   Wire.begin();
-   
-  // --- SETUP GY521 ---
   delay(100);
-  if (sensor.wakeup() == false) {
-    Serial.println("\tERRORE: Impossibile connettere GY521 (check wiring o address 0x68)");
-    while(1); // Blocca se il sensore locale è rotto
+  if (sensor.wakeup()) {
+    sensor.setAccelSensitivity(0); 
+    sensor.setGyroSensitivity(0);
   }
-  sensor.setAccelSensitivity(0);  // 2g
-  sensor.setGyroSensitivity(0);   // 250 degrees/s
-  sensor.setThrottle(false);
-  
-  // Reset errori calibrazione
-  sensor.axe = 0; sensor.aye = 0; sensor.aze = 0;
-  sensor.gxe = 0; sensor.gye = 0; sensor.gze = 0;
-  Serial.println("GY521 Pronto.");
 
-  // --- SETUP BLE ---
-  if (!BLE.begin()) {
-    Serial.println("Avvio BLE fallito!");
-    while (1);
-  }
-  Serial.println("Central BLE attiva. Scansione periferica IR...");
-  BLE.scanForUuid(serviceUUID);
+  // BLE
+  if (!BLE.begin()) Serial.println("BLE Failed!");
+  else BLE.scanForUuid(serviceUUID);
 }
-void loop() {
 
-  // Handle WiFi/web clients every cycle
+void loop() {
   handleWebClient();
 
-  // Cerca la periferica IR
-  BLEDevice peripheral = BLE.available();
-
-  if (peripheral) {
-    if (peripheral.localName() == "PortentaSensor") {
-      BLE.stopScan();
-      monitorSystem(peripheral); // Entra nel loop principale
-      BLE.scanForUuid(serviceUUID); // Riprendi scansione se disconnesso
-    }
-  }
-  
-  // NOTA: Se la periferica IR non è connessa, controlliamo comunque le vibrazioni?
-  // Se vuoi controllare le vibrazioni anche quando il BLE è disconnesso, 
-  // scommenta la riga qui sotto:
-  // checkVibration(); 
-}
-
-// Funzione che gestisce SIA il BLE che il GY521 contemporaneamente
-void monitorSystem(BLEDevice peripheral) {
-  Serial.println("Connessione al sensore IR...");
-
-  if (!peripheral.connect()) {
-    Serial.println("Connessione fallita!");
-    return;
-  }
-  if (!peripheral.discoverAttributes()) {
-    Serial.println("Attributi non trovati!");
-    peripheral.disconnect();
-    return;
-  }
-
-  BLECharacteristic sensorChar = peripheral.characteristic(charUUID);
-  
-  if (sensorChar && sensorChar.canSubscribe()) {
-    sensorChar.subscribe();
-  }
-
-  Serial.println("SISTEMA ATTIVO: Monitoraggio Vibrazioni (Locale) + IR (Remoto)");
-
-  while (peripheral.connected()) {
-    handleWebClient();  // keep responding to web browsers
-    
-    // 1. GESTIONE BLE (IR REMOTO)
-    if (sensorChar.valueUpdated()) {
-      byte status;
-      sensorChar.readValue(status);
-      printIRStatus(status);
-    }
-
-    // 2. GESTIONE GY521 (VIBRAZIONE LOCALE)
-    // Usiamo millis() invece di delay() per non bloccare il BLE
+  if (!isEcoMode) {
     if (millis() - lastGyroReadTime >= gyroInterval) {
       lastGyroReadTime = millis();
       checkVibration();
     }
+    
+    // ONLY Manage BLE if we are NOT washing
+    // This saves energy by disconnecting the sensor while the machine runs
+    if (machineState != STATE_WASHING) {
+       manageBLE();
+    } else {
+       // If we are Washing, ensure we are DISCONNECTED
+       if (isBleConnected) {
+         Serial.println("Washing started. Disconnecting IR Sensor to save power...");
+         centralPeripheral.disconnect();
+         isBleConnected = false;
+         lastIRStatus = -1; // Unknown while washing
+       }
+    }
+
+    manageLaundryLogic();
+  } 
+  else {
+    rtos::ThisThread::sleep_for(100); 
   }
-  Serial.println("Sensore IR disconnesso.");
+}
+
+// --- CORE LOGIC ---
+
+void manageLaundryLogic() {
+  unsigned long now = millis();
+
+  // STATE 1: IDLE -> WASHING
+  if (machineState == STATE_IDLE) {
+    
+    // Check timeout
+    if (startupWindowStart > 0 && (now - startupWindowStart > STARTUP_WINDOW)) {
+      resetIdleCounters(); 
+    }
+
+    // UPDATED THRESHOLD CHECK (150 IR)
+    if (vibration_counter > MIN_VIB_TO_START && ir_startup_counter > MIN_IR_TO_START) {
+      machineState = STATE_WASHING;
+      Serial.println("Cycle STARTED (Confirmed by Vibration + Presence)");
+    }
+  }
+
+  // STATE 2: WASHING -> READY
+  else if (machineState == STATE_WASHING) {
+    if (now - lastVibrationTime > TIMEOUT_DONE) {
+      machineState = STATE_READY;
+      Serial.println("Cycle FINISHED. Re-enabling IR Sensor...");
+      // BLE will automatically reconnect in the next loop() because state is no longer WASHING
+      BLE.scanForUuid(serviceUUID); // Restart scanning immediately
+    }
+  }
+
+  // STATE 3: READY -> RESET (Pickup Logic)
+  else if (machineState == STATE_READY) {
+    // Only proceed if BLE has reconnected
+    if (isBleConnected) {
+        if (lastIRStatus == 1 || lastIRStatus == 2) {
+          userVisitedForPickup = true;
+          roomEmptyStartTime = 0; 
+        }
+        if (lastIRStatus == 0) {
+          if (roomEmptyStartTime == 0) roomEmptyStartTime = now;
+          
+          if (userVisitedForPickup && (now - roomEmptyStartTime > TIMEOUT_RESET)) {
+            resetSystem();
+          }
+        }
+    }
+  }
+}
+
+void resetSystem() {
+  Serial.println("System RESET for next user");
+  machineState = STATE_IDLE;
+  resetIdleCounters();
+  userVisitedForPickup = false;
+  roomEmptyStartTime = 0;
+}
+
+void resetIdleCounters() {
+  vibration_counter = 0;
+  ir_startup_counter = 0;
+  startupWindowStart = 0;
+  firstVibrationTime = 0;
+  lastVibrationTime = 0;
 }
 
 void checkVibration() {
-  ax = ay = az = 0;
-  gx = gy = gz = 0;
-  t = 0;
+  sensor.read();
+  float ax = sensor.getAccelX();
+  float ay = sensor.getAccelY();
+  float az = sensor.getAccelZ(); 
 
-  // Leggi 20 campioni (dal tuo codice originale)
-  for (int i = 0; i < 20; i++) {
-    sensor.read();
-    ax -= sensor.getAccelX();
-    ay -= sensor.getAccelY();
-    az -= sensor.getAccelZ();
-    gx -= sensor.getGyroX();
-    gy -= sensor.getGyroY();
-    gz -= sensor.getGyroZ();
-    t += sensor.getTemperature(); // Nota: questo rallenta un po' il loop
+  static float prevAx = 0;
+  static float prevAy = 0;
+  static float prevAz = 0; 
+
+  if (prevAx == 0 && prevAy == 0 && prevAz == 0) { 
+    prevAx = ax; prevAy = ay; prevAz = az; 
+    return; 
   }
 
-  // Logica di rilevamento vibrazione
-  // Nota: ho aggiunto parentesi per chiarire la logica OR/AND
-  if ((ax > threshold && ay > threshold) || 
-      (ax > threshold && az > threshold) || 
-      (ay > threshold && az > threshold)) {
-    
+  float deltaX = abs(ax - prevAx);
+  float deltaY = abs(ay - prevAy);
+  float deltaZ = abs(az - prevAz); 
+
+  if (deltaX > VIBRATION_THRESHOLD || deltaY > VIBRATION_THRESHOLD || deltaZ > VIBRATION_THRESHOLD) {
     vibration_counter++;
+    lastVibrationTime = millis();
     
-    Serial.print(">>> VIBRAZIONE RILEVATA! (Count: ");
-    Serial.print(vibration_counter);
-    Serial.println(")");
-
-    // store values for web page
-    lastVibrationCount = vibration_counter;
-    lastAx = ax;
-    lastAy = ay;
-    lastAz = az;
-    
-    // Qui puoi accendere un LED rosso locale se vuoi
-    // digitalWrite(LEDR, LOW); 
-  } else {
-    // digitalWrite(LEDR, HIGH);
+    if (machineState == STATE_IDLE) {
+      if (startupWindowStart == 0) startupWindowStart = millis();
+      if (firstVibrationTime == 0) firstVibrationTime = millis();
+    }
   }
-
-  // Adjust calibration errors (Codice originale di autocalibrazione continua)
-  sensor.axe += ax * 0.05;
-  sensor.aye += ay * 0.05;
-  sensor.aze += az * 0.05;
-  sensor.gxe += gx * 0.05;
-  sensor.gye += gy * 0.05;
-  sensor.gze += gz * 0.05;
+  
+  prevAx = ax; prevAy = ay; prevAz = az;
 }
 
-void printIRStatus(byte status) {
-  Serial.print("[BLE IR] ");
-  lastIRStatus = status;   // expose to web UI
-  if (status == 0) Serial.println("Stanza Vuota");
-  else if (status == 1) Serial.println("Movimento Rilevato!");
-  else if (status == 2) Serial.println("Presenza Confermata");
+void manageBLE() {
+  if (isBleConnected) {
+    if (!centralPeripheral.connected()) {
+      isBleConnected = false;
+      lastIRStatus = -1;
+      BLE.scanForUuid(serviceUUID);
+    } else {
+      if (irCharacteristic.valueUpdated()) {
+        byte val;
+        irCharacteristic.readValue(val);
+        
+        if (val == 1) { 
+           ir_startup_counter++;
+           if (machineState == STATE_IDLE && startupWindowStart == 0) {
+             startupWindowStart = millis();
+           }
+        }
+
+        lastIRStatus = val; 
+
+        if (val == 1 || val == 2) {
+          lastMotionTime = millis();
+          hasDetectedMotionOnce = true;
+        }
+      }
+    }
+  } else {
+    BLEDevice potentialDevice = BLE.available();
+    if (potentialDevice && potentialDevice.localName() == "PortentaSensor") {
+      BLE.stopScan();
+      if (potentialDevice.connect() && potentialDevice.discoverAttributes()) {
+         irCharacteristic = potentialDevice.characteristic(charUUID);
+         if (irCharacteristic) {
+           irCharacteristic.subscribe();
+           centralPeripheral = potentialDevice;
+           isBleConnected = true;
+         }
+      }
+      if (!isBleConnected) BLE.scanForUuid(serviceUUID);
+    }
+  }
+}
+
+// --- WEB SERVER ---
+
+void handleWebClient() {
+  WiFiClient client = server.available();
+  if (client) {
+    String currentLine = "";
+    String request = ""; 
+    while (client.connected()) {
+      if (client.available()) {
+        char c = client.read();
+        if (request.length() < 50) request += c;
+        if (c == '\n') {
+          if (currentLine.length() == 0) {
+            if (request.indexOf("GET /sleep") >= 0) enterEcoMode();
+            else if (request.indexOf("GET /wake") >= 0) exitEcoMode();
+            sendHTML(client);
+            break;
+          } else { currentLine = ""; }
+        } else if (c != '\r') { currentLine += c; }
+      }
+    }
+    client.stop();
+  }
+}
+
+void sendHTML(WiFiClient &client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-type:text/html");
+  client.println();
+
+  client.print("<html><head>");
+  client.print("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+  if (!isEcoMode) client.print("<meta http-equiv=\"refresh\" content=\"2\">");
+  
+  client.print("<style>");
+  client.print("* { box-sizing: border-box; }"); 
+  client.print("body { font-family: Helvetica, Arial, sans-serif; background: #f2f2f7; text-align: center; padding: 20px; color: #333; margin: 0; }");
+  client.print(".card { background: white; border-radius: 16px; padding: 20px; margin: 15px auto; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 400px; text-align: left; }");
+  client.print(".header { font-size: 0.85rem; text-transform: uppercase; color: #8e8e93; font-weight: bold; margin-bottom: 8px; }");
+  client.print(".big-val { font-size: 1.8rem; font-weight: 800; margin-bottom: 5px; }");
+  client.print(".sub-val { font-size: 0.9rem; color: #8e8e93; margin-top: 2px; }");
+  client.print(".status-green { color: #28a745; } .status-red { color: #dc3545; } .status-orange { color: #fd7e14; } .status-blue { color: #007bff; }");
+  client.print(".btn { display: block; width: 100%; padding: 14px; margin-top: 10px; border-radius: 12px; text-decoration: none; font-weight: bold; text-align: center; color: white; -webkit-appearance: none; }");
+  client.print(".btn-sleep { background: #007bff; } .btn-wake { background: #28a745; }");
+  client.print("</style>");
+  
+  client.print("<script>");
+  client.print("function formatTime(msDiff) {");
+  client.print("  if (msDiff <= 0) return '--:--';");
+  client.print("  var date = new Date(new Date().getTime() - msDiff);");
+  client.print("  return date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});");
+  client.print("}");
+
+  client.print("function updateTimes() {");
+  client.print("  var now = "); client.print(millis()); client.print(";");
+  
+  client.print("  var lastMotion = "); client.print(lastMotionTime); client.print(";");
+  client.print("  if (lastMotion > 0) {");
+  client.print("    document.getElementById('seenTime').innerHTML = 'Last seen: ' + formatTime(now - lastMotion);");
+  client.print("  }");
+
+  client.print("  var startT = "); client.print(firstVibrationTime); client.print(";");
+  client.print("  var state = "); client.print(machineState); client.print(";");
+  client.print("  if (state > 0 && startT > 0) {");
+  client.print("    document.getElementById('startTime').innerHTML = 'Started: ' + formatTime(now - startT);");
+  client.print("  }");
+  
+  client.print("  var endT = "); client.print(lastVibrationTime); client.print(";");
+  client.print("  if (state == 2 && endT > 0) {");
+  client.print("    document.getElementById('endTime').innerHTML = 'Finished: ' + formatTime(now - endT);");
+  client.print("  }");
+  client.print("}");
+  client.print("</script>");
+
+  client.print("</head><body onload='updateTimes()'>");
+
+  client.print("<h1>WashPal Insights</h1>");
+
+  // --- CARD 1: LAUNDRY ROOM ---
+  client.print("<div class=\"card\">");
+  client.print("<div class=\"header\">Laundry Room</div>");
+  if (machineState == STATE_WASHING) {
+    // SPECIAL STATUS WHEN WASHING (SENSOR SLEEPING)
+    client.print("<div class=\"big-val\" style='color:#aaa'>Sensor Paused</div>");
+    client.print("<div class=\"sub-val\">Saving energy during cycle</div>");
+  } else {
+    if (!isBleConnected) {
+      client.print("<div class=\"big-val status-red\">Disconnected</div>");
+      client.print("<div class=\"sub-val\">IR Sensor offline</div>");
+    } else {
+      if (lastIRStatus == 1 || lastIRStatus == 2) {
+         client.print("<div class=\"big-val status-red\">OCCUPIED</div>");
+         client.print("<div class=\"sub-val\">Movement detected</div>");
+      } else {
+         client.print("<div class=\"big-val status-green\">EMPTY</div>");
+         client.print("<div class=\"sub-val\" id=\"seenTime\">Loading...</div>");
+      }
+    }
+  }
+  client.print("</div>");
+
+  // --- CARD 2: MACHINE STATUS ---
+  if (!isEcoMode) {
+    client.print("<div class=\"card\">");
+    client.print("<div class=\"header\">Machine Status</div>");
+    
+    if (machineState == STATE_WASHING) {
+       client.print("<div class=\"big-val status-orange\">RUNNING</div>");
+       client.print("<div class=\"sub-val\" id=\"startTime\">Calculated...</div>");
+       client.print("<div class=\"sub-val\">Vibrations: "); client.print(vibration_counter); client.print("</div>");
+    } 
+    else if (machineState == STATE_READY) {
+       client.print("<div class=\"big-val status-blue\">READY TO BE TAKEN</div>");
+       client.print("<div class=\"sub-val\" id=\"endTime\">Calculated...</div>");
+       if (userVisitedForPickup) client.print("<div class=\"sub-val status-orange\">Pickup in progress...</div>");
+       else client.print("<div class=\"sub-val\">Waiting for pickup</div>");
+    } 
+    else {
+       client.print("<div class=\"big-val status-green\">IDLE</div>");
+       client.print("<div class=\"sub-val\">Waiting for start</div>");
+       
+       if (vibration_counter > 0 || ir_startup_counter > 0) {
+         client.print("<div style='margin-top:10px; border-top:1px solid #eee; padding-top:5px;'>");
+         client.print("<div class=\"sub-val\">Vibrations: "); 
+         client.print(vibration_counter); client.print("/50</div>");
+         
+         client.print("<div class=\"sub-val\">User Moves: "); 
+         client.print(ir_startup_counter); client.print("/150</div>");
+         client.print("</div>");
+       }
+    }
+    client.print("</div>");
+  }
+
+  // --- CARD 3: SYSTEM ---
+  client.print("<div class=\"card\">");
+  if (isEcoMode) {
+    client.print("<div class=\"header\">System Status</div>");
+    client.print("<div class=\"big-val\">Sleeping</div>");
+    client.print("<a href=\"/wake\" class=\"btn btn-wake\">WAKE UP</a>");
+  } else {
+    client.print("<a href=\"/sleep\" class=\"btn btn-sleep\">Enter Eco Mode</a>");
+  }
+  client.print("</div>");
+
+  client.print("</body></html>");
+}
+
+void enterEcoMode() {
+  if (isEcoMode) return;
+  isEcoMode = true;
+  Wire.beginTransmission(0x68); Wire.write(0x6B); Wire.write(0x40); Wire.endTransmission();
+  if (isBleConnected) { centralPeripheral.disconnect(); isBleConnected = false; }
+  BLE.stopScan();
+  digitalWrite(LEDG, LOW); delay(200); digitalWrite(LEDG, HIGH);
+}
+
+void exitEcoMode() {
+  if (!isEcoMode) return;
+  isEcoMode = false;
+  Wire.beginTransmission(0x68); Wire.write(0x6B); Wire.write(0x00); Wire.endTransmission();
+  BLE.scanForUuid(serviceUUID);
+  digitalWrite(LEDG, LOW); delay(200); digitalWrite(LEDG, HIGH);
 }
