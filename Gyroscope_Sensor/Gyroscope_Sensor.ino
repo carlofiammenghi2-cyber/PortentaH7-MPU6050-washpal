@@ -35,11 +35,11 @@ unsigned long firstVibrationTime = 0;
 unsigned long lastVibrationTime = 0;  
 uint32_t vibration_counter = 0;       
 
-// NEW: STARTUP FILTER (Threshold increased to 150)
+// Startup Filter (Threshold increased to 150)
 uint32_t ir_startup_counter = 0;      
 unsigned long startupWindowStart = 0; 
-const int MIN_VIB_TO_START = 50;      // Vibration stays at 50
-const int MIN_IR_TO_START = 150;      // UPDATED: IR needs 150 counts (approx 15 sec)
+const int MIN_VIB_TO_START = 50;      // Minimum vibration for the starting of the washing machine
+const int MIN_IR_TO_START = 150;      // Minumum count of the IR triggering (approx 15 sec)
 const unsigned long STARTUP_WINDOW = 300000; // 5 Minutes
 
 // Logic Constants
@@ -81,14 +81,14 @@ void setup() {
   pinMode(LEDR, OUTPUT); pinMode(LEDG, OUTPUT); pinMode(LEDB, OUTPUT);
   digitalWrite(LEDR, HIGH); digitalWrite(LEDG, HIGH); digitalWrite(LEDB, HIGH);
 
-  // WiFi
+  // Creating access point for Wi-Fi
   Serial.print("Creating AP: ");
   Serial.println(ssid);
   if (WiFi.beginAP(ssid, pass) != WL_AP_LISTENING) while (true);
   delay(2000);
   server.begin();
   
-  // Gyro
+  // Gyroscope setup 
   Wire.begin();
   delay(100);
   if (sensor.wakeup()) {
@@ -96,7 +96,7 @@ void setup() {
     sensor.setGyroSensitivity(0);
   }
 
-  // BLE
+  // BLE setup
   if (!BLE.begin()) Serial.println("BLE Failed!");
   else BLE.scanForUuid(serviceUUID);
 }
