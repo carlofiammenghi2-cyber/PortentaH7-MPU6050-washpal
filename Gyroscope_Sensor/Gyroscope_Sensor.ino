@@ -42,7 +42,7 @@ const int MIN_VIB_TO_START = 50; // Minimum vibration for the starting of the wa
 const unsigned long STARTUP_WINDOW = 300000; // 5 Minutes
 
 // Logic Constants
-const unsigned long TIMEOUT_DONE = 20000; // 5 Mins silence = Done
+const unsigned long TIMEOUT_DONE = 300000; // 5 Mins silence = Done
 const unsigned long TIMEOUT_RESET = 60000; // 1 Min empty = Reset
 
 // Pickup Logic
