@@ -28,7 +28,7 @@ enum WashState {
   STATE_WASHING,
   STATE_READY
 };
-WashState machineState = STATE_IDLE;
+WashState machineState = STATE_IDLE; // Default value
 
 // Timestamps & Counters
 unsigned long firstVibrationTime = 0; 
@@ -38,13 +38,12 @@ uint32_t vibration_counter = 0;
 // Startup Filter (Threshold increased to 150)
 uint32_t ir_startup_counter = 0;      
 unsigned long startupWindowStart = 0; 
-const int MIN_VIB_TO_START = 50;      // Minimum vibration for the starting of the washing machine
-const int MIN_IR_TO_START = 150;      // Minumum count of the IR triggering (approx 15 sec)
+const int MIN_VIB_TO_START = 50; // Minimum vibration for the starting of the washing machine
 const unsigned long STARTUP_WINDOW = 300000; // 5 Minutes
 
 // Logic Constants
-const unsigned long TIMEOUT_DONE = 300000; // 5 Mins silence = Done
-const unsigned long TIMEOUT_RESET = 300000; // 5 Mins empty = Reset
+const unsigned long TIMEOUT_DONE = 20000; // 5 Mins silence = Done
+const unsigned long TIMEOUT_RESET = 60000; // 1 Min empty = Reset
 
 // Pickup Logic
 bool userVisitedForPickup = false;
@@ -79,6 +78,7 @@ void setup() {
   
   // Power Saving
   pinMode(LEDR, OUTPUT); pinMode(LEDG, OUTPUT); pinMode(LEDB, OUTPUT);
+  // Turns off the LEDs
   digitalWrite(LEDR, HIGH); digitalWrite(LEDG, HIGH); digitalWrite(LEDB, HIGH);
 
   // Creating access point for Wi-Fi
@@ -92,8 +92,8 @@ void setup() {
   Wire.begin();
   delay(100);
   if (sensor.wakeup()) {
-    sensor.setAccelSensitivity(0); 
-    sensor.setGyroSensitivity(0);
+    sensor.setAccelSensitivity(0); // Adjust the sensitivity
+    sensor.setGyroSensitivity(0); // Adjust the sensitivity
   }
 
   // BLE setup
@@ -115,7 +115,7 @@ void loop() {
     if (machineState != STATE_WASHING) {
        manageBLE();
     } else {
-       // If we are Washing, ensure we are DISCONNECTED
+       // If we are washing, ensure we are disconnected
        if (isBleConnected) {
          Serial.println("Washing started. Disconnecting IR Sensor to save power...");
          centralPeripheral.disconnect();
@@ -140,19 +140,21 @@ void manageLaundryLogic() {
   if (machineState == STATE_IDLE) {
     
     // Check timeout
+    // If startupWindowStart increases the condition will never get to STARTUP_WINDOW
     if (startupWindowStart > 0 && (now - startupWindowStart > STARTUP_WINDOW)) {
       resetIdleCounters(); 
     }
 
-    // UPDATED THRESHOLD CHECK (150 IR)
-    if (vibration_counter > MIN_VIB_TO_START && ir_startup_counter > MIN_IR_TO_START) {
+    // Checks if the number of vibrations are enough to change state to WASHING
+    if (vibration_counter > MIN_VIB_TO_START) {
       machineState = STATE_WASHING;
-      Serial.println("Cycle STARTED (Confirmed by Vibration + Presence)");
+      Serial.println("Cycle STARTED (Confirmed by Vibration)");
     }
   }
 
   // STATE 2: WASHING -> READY
   else if (machineState == STATE_WASHING) {
+    // Checks if TIMEONE_DONE is passed since the lastVibration 
     if (now - lastVibrationTime > TIMEOUT_DONE) {
       machineState = STATE_READY;
       Serial.println("Cycle FINISHED. Re-enabling IR Sensor...");
@@ -172,6 +174,8 @@ void manageLaundryLogic() {
         if (lastIRStatus == 0) {
           if (roomEmptyStartTime == 0) roomEmptyStartTime = now;
           
+          // Checks if TIMEOUT_RESET is passed since the room is empty again after finishing a washing cycle
+          // meaning that the user unload the washing machine
           if (userVisitedForPickup && (now - roomEmptyStartTime > TIMEOUT_RESET)) {
             resetSystem();
           }
@@ -202,9 +206,9 @@ void checkVibration() {
   float ay = sensor.getAccelY();
   float az = sensor.getAccelZ(); 
 
-  static float prevAx = 0;
-  static float prevAy = 0;
-  static float prevAz = 0; 
+  static float prevAx = 0; // Static, no reinitialization
+  static float prevAy = 0; // Static, no reinitialization
+  static float prevAz = 0; // Static, no reinitialization
 
   if (prevAx == 0 && prevAy == 0 && prevAz == 0) { 
     prevAx = ax; prevAy = ay; prevAz = az; 
@@ -220,6 +224,7 @@ void checkVibration() {
     lastVibrationTime = millis();
     
     if (machineState == STATE_IDLE) {
+      // If it is the first time it runs the application
       if (startupWindowStart == 0) startupWindowStart = millis();
       if (firstVibrationTime == 0) firstVibrationTime = millis();
     }
@@ -239,8 +244,9 @@ void manageBLE() {
         byte val;
         irCharacteristic.readValue(val);
         
+        // If the IR sensor detects motion
         if (val == 1) { 
-           ir_startup_counter++;
+           ir_startup_counter++; // Increment the counters of motion in the room
            if (machineState == STATE_IDLE && startupWindowStart == 0) {
              startupWindowStart = millis();
            }
@@ -252,6 +258,7 @@ void manageBLE() {
           lastMotionTime = millis();
           hasDetectedMotionOnce = true;
         }
+
       }
     }
   } else {
@@ -384,7 +391,6 @@ void sendHTML(WiFiClient &client) {
     } 
     else if (machineState == STATE_READY) {
        client.print("<div class=\"big-val status-blue\">READY TO BE TAKEN</div>");
-       client.print("<div class=\"sub-val\" id=\"endTime\">Calculated...</div>");
        if (userVisitedForPickup) client.print("<div class=\"sub-val status-orange\">Pickup in progress...</div>");
        else client.print("<div class=\"sub-val\">Waiting for pickup</div>");
     } 
@@ -392,14 +398,10 @@ void sendHTML(WiFiClient &client) {
        client.print("<div class=\"big-val status-green\">IDLE</div>");
        client.print("<div class=\"sub-val\">Waiting for start</div>");
        
-       if (vibration_counter > 0 || ir_startup_counter > 0) {
+       if (vibration_counter > 0) {
          client.print("<div style='margin-top:10px; border-top:1px solid #eee; padding-top:5px;'>");
          client.print("<div class=\"sub-val\">Vibrations: "); 
          client.print(vibration_counter); client.print("/50</div>");
-         
-         client.print("<div class=\"sub-val\">User Moves: "); 
-         client.print(ir_startup_counter); client.print("/150</div>");
-         client.print("</div>");
        }
     }
     client.print("</div>");
@@ -423,6 +425,9 @@ void enterEcoMode() {
   if (isEcoMode) return;
   isEcoMode = true;
   Wire.beginTransmission(0x68); Wire.write(0x6B); Wire.write(0x40); Wire.endTransmission();
+
+  // If it's already connected, since we are entering the Eco Mode, disconnect the BLE
+  // and the Peripheral Board
   if (isBleConnected) { centralPeripheral.disconnect(); isBleConnected = false; }
   BLE.stopScan();
   digitalWrite(LEDG, LOW); delay(200); digitalWrite(LEDG, HIGH);
@@ -432,6 +437,9 @@ void exitEcoMode() {
   if (!isEcoMode) return;
   isEcoMode = false;
   Wire.beginTransmission(0x68); Wire.write(0x6B); Wire.write(0x00); Wire.endTransmission();
+
+
+  // Turning off the Eco Mode restart the BLE connection
   BLE.scanForUuid(serviceUUID);
   digitalWrite(LEDG, LOW); delay(200); digitalWrite(LEDG, HIGH);
 }

@@ -31,7 +31,8 @@ void setup() {
 
   // Start BLE
   if (!BLE.begin()) {
-    while (1) { digitalWrite(LEDR, LOW); } // Stuck Red = Error
+    // If it's not connected, turn on the red light 
+    while (1) { digitalWrite(LEDR, LOW); } // Led Red = Error
   }
 
   BLE.setLocalName("PortentaSensor"); 
@@ -48,6 +49,8 @@ void setup() {
 
 void loop() {
   BLEDevice central = BLE.central();
+  static int lastWasZero = -1; // Being static it is not initialized again in the next loop
+
 
   if (central) {
     // When connected, turn off the "Waiting" Green light
@@ -62,18 +65,18 @@ void loop() {
       if (currentState == 1) {
         irCharacteristic.writeValue((byte)1);
         Serial.println("Motion! Sending 1...");
+        lastWasZero = -1;
         
         // Blink Blue LED to show data transmission
         digitalWrite(LEDB, LOW); delay(10); digitalWrite(LEDB, HIGH);
 
-        // Updated Delay: 100ms
+        // Updated Delay: 100ms = delay + led triggering
         // Target: 50 counts. 
         // 50 * 100ms = 5 Seconds of motion to trigger "Washing"
         delay(90); 
       } 
       // If no motion (0), only send if it changed (Save bandwidth)
       else {
-         static int lastWasZero = -1;
          if (lastWasZero != 0) {
             irCharacteristic.writeValue((byte)0);
             Serial.println("Empty. Sending 0...");
