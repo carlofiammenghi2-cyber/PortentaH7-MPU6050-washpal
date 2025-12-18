@@ -40,14 +40,6 @@ The system utilizes a **distributed sensing model** with two primary nodes:
 | Central Unit | Vibration sensing & Wi-Fi server | Arduino **Portenta H7** + **GY521 (MPU6050)** |
 | Peripheral Unit | Motion detection | Arduino **Portenta H7** + **AM312 PIR Sensor** |
 
-### Production Path *(Recommended for Deployment)*
-These replacements reduce the **bill of materials (BOM)** by approximately **90%**:
-
-| Component | Suggested Hardware | Approx. Cost |
-|------------|--------------------|---------------|
-| Central Unit | **Arduino Nano ESP32** | ~$20 USD |
-| Peripheral Unit | **Seeed Studio XIAO nRF52840** | ~$10 USD |
-
 ---
 
 ## 🧠 Software Logic
