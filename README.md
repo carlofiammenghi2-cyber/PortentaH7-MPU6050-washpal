@@ -79,11 +79,12 @@ Users can access a **local web dashboard** to view:
 ## 📂 Repository Structure
 
 /WashPal
-├── Gyroscope_Sensor/
-│ ├── Gyroscope_Sensor.ino # Central Unit: Vibration processing, Wi-Fi Server, BLE Client
-│ └── arduino_secrets.h # Wi-Fi credentials (to be added manually)
-├── AM312_Pir_Sensor/
-│ └── AM312_Pir_Sensor.ino # Peripheral Unit: Motion detection, BLE Service
+
+├── Gyroscope_Sensor/  
+│ ├── Gyroscope_Sensor.ino # Central Unit: Vibration processing, Wi-Fi Server, BLE Client  
+│ └── arduino_secrets.h # Wi-Fi credentials (to be added manually)  
+├── AM312_Pir_Sensor/   
+│ └── AM312_Pir_Sensor.ino # Peripheral Unit: Motion detection, BLE Service  
 └── README.md
 
 
